@@ -3,6 +3,10 @@
     "name": "YapeProMobile",
     "slug": "YapeProMobile",
     "version": "1.0.0",
+    "extra": {
+      "REACT_APP_SUPABASE_URL": "https://sjgyjggnvkvmtcxkpfqv.supabase.co",
+      "REACT_APP_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqZ3lqZ2dudmt2bXRjeGtwZnF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1MzE4OTAsImV4cCI6MjA3MjEwNzg5MH0.yOgC-8H-2pomUOQUCYT_I_S3fJiPMJ0mnJf8GZeVltc"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {
