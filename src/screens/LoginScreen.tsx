@@ -16,17 +16,17 @@ const LoginScreen: React.FC = () => {
   };
 
   return (
-    <View className="flex-1 justify-center p-4 bg-gray-100">
-      <Text className="text-2xl font-bold mb-4">Iniciar Sesión en Yape Pro</Text>
+    <View style={{ flex: 1, justifyContent: 'center', padding: 16, backgroundColor: '#f3f4f6' }}>
+      <Text style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 16 }}>Iniciar Sesión en Yape Pro</Text>
       <TextInput
-        className="border border-gray-300 p-2 mb-4 rounded"
+        style={{ borderWidth: 1, borderColor: '#d1d5db', padding: 8, marginBottom: 16, borderRadius: 4 }}
         placeholder="Email"
         value={email}
         onChangeText={setEmail}
         autoCapitalize="none"
       />
       <TextInput
-        className="border border-gray-300 p-2 mb-4 rounded"
+        style={{ borderWidth: 1, borderColor: '#d1d5db', padding: 8, marginBottom: 16, borderRadius: 4 }}
         placeholder="Contraseña"
         value={password}
         onChangeText={setPassword}
