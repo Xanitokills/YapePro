@@ -1,0 +1,313 @@
+/* PymeYapePro - Estilos personalizados */
+/* Ubicación: src/styles/pymeyapepro.css */
+
+/* Si necesitas utilidades de Tailwind, importa pymeyapepro.css en tailwind.css o viceversa. Este archivo debe contener solo estilos personalizados. */
+
+/* Variables CSS personalizadas para PymeYapePro */
+:root {
+  --pymeyape-primary: #d97706; /* yellow-600 */
+  --pymeyape-primary-hover: #b45309; /* yellow-700 */
+  --pymeyape-secondary: #1f2937; /* gray-800 */
+  --pymeyape-success: #10b981; /* emerald-500 */
+  --pymeyape-warning: #f59e0b; /* amber-500 */
+  --pymeyape-error: #ef4444; /* red-500 */
+  --pymeyape-info: #3b82f6; /* blue-500 */
+}
+
+/* Componentes personalizados */
+@layer components {
+  /* Botón principal de PymeYapePro */
+  .btn-pymeyape-primary {
+    @apply bg-yellow-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-yellow-700 transition-colors duration-200 flex items-center justify-center;
+  }
+
+  .btn-pymeyape-secondary {
+    @apply bg-gray-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-gray-700 transition-colors duration-200 flex items-center justify-center;
+  }
+
+  .btn-pymeyape-outline {
+    @apply border-2 border-yellow-600 text-yellow-600 px-4 py-2 rounded-lg font-medium hover:bg-yellow-600 hover:text-white transition-colors duration-200 flex items-center justify-center;
+  }
+
+  /* Cards personalizadas */
+  .card-pymeyape {
+    @apply bg-white rounded-lg shadow-md border border-gray-100 hover:shadow-lg transition-shadow duration-200;
+  }
+
+  .card-pymeyape-header {
+    @apply p-6 border-b border-gray-100;
+  }
+
+  .card-pymeyape-body {
+    @apply p-6;
+  }
+
+  /* Métricas del dashboard */
+  .metric-card {
+    @apply bg-white p-6 rounded-lg shadow-md border-l-4 hover:shadow-lg transition-shadow duration-200;
+  }
+
+  .metric-card-revenue {
+    @apply border-green-500;
+  }
+
+  .metric-card-orders {
+    @apply border-blue-500;
+  }
+
+  .metric-card-pending {
+    @apply border-yellow-500;
+  }
+
+  .metric-card-alerts {
+    @apply border-red-500;
+  }
+
+  /* Sidebar personalizada */
+  .sidebar-pymeyape {
+    @apply w-64 bg-gray-900 text-white h-screen p-4 shadow-xl;
+  }
+
+  .sidebar-nav-item {
+    @apply w-full flex items-center px-4 py-3 rounded-lg transition-all duration-200 text-left;
+  }
+
+  .sidebar-nav-item-active {
+    @apply bg-yellow-600 text-white shadow-md;
+  }
+
+  .sidebar-nav-item-inactive {
+    @apply text-gray-300 hover:bg-gray-800 hover:text-white;
+  }
+
+  /* Tablas */
+  .table-pymeyape {
+    @apply w-full bg-white rounded-lg shadow-md overflow-hidden;
+  }
+
+  .table-pymeyape thead {
+    @apply bg-gray-50;
+  }
+
+  .table-pymeyape th {
+    @apply text-left p-4 font-semibold text-gray-700;
+  }
+
+  .table-pymeyape td {
+    @apply p-4 border-b border-gray-100;
+  }
+
+  .table-pymeyape tbody tr {
+    @apply hover:bg-gray-50 transition-colors duration-150;
+  }
+
+  /* Estados y badges */
+  .status-paid {
+    @apply bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .status-pending {
+    @apply bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .status-failed {
+    @apply bg-red-100 text-red-800 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .status-refunded {
+    @apply bg-gray-100 text-gray-800 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .stock-available {
+    @apply bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-medium;
+  }
+
+  .stock-low {
+    @apply bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium;
+  }
+
+  /* Formularios */
+  .input-pymeyape {
+    @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500 transition-colors duration-200;
+  }
+
+  .input-pymeyape-search {
+    @apply w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500 transition-colors duration-200;
+  }
+
+  /* Alertas */
+  .alert-pymeyape {
+    @apply p-4 rounded-lg border-l-4;
+  }
+
+  .alert-success {
+    @apply bg-green-50 border-green-400 text-green-800;
+  }
+
+  .alert-warning {
+    @apply bg-yellow-50 border-yellow-400 text-yellow-800;
+  }
+
+  .alert-error {
+    @apply bg-red-50 border-red-400 text-red-800;
+  }
+
+  .alert-info {
+    @apply bg-blue-50 border-blue-400 text-blue-800;
+  }
+
+  /* Loading y skeleton */
+  .loading-skeleton {
+    @apply animate-pulse bg-gray-200 rounded;
+  }
+
+  /* Carrito de compras */
+  .cart-item {
+    @apply flex items-center justify-between p-3 bg-gray-50 rounded-lg border hover:bg-gray-100 transition-colors duration-150;
+  }
+
+  .cart-total {
+    @apply border-t-2 border-gray-200 pt-4 text-lg font-bold;
+  }
+
+  /* Animaciones personalizadas */
+  .fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+  }
+
+  .slide-in-right {
+    animation: slideInRight 0.3s ease-out;
+  }
+
+  .bounce-in {
+    animation: bounceIn 0.5s ease-out;
+  }
+}
+
+/* Utilidades personalizadas */
+@layer utilities {
+  .text-pymeyape-primary {
+    color: var(--pymeyape-primary);
+  }
+
+  .bg-pymeyape-primary {
+    background-color: var(--pymeyape-primary);
+  }
+
+  .border-pymeyape-primary {
+    border-color: var(--pymeyape-primary);
+  }
+
+  /* Scrollbar personalizada */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(156 163 175) rgb(243 244 246);
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: rgb(243 244 246);
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgb(156 163 175);
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: rgb(107 114 128);
+  }
+}
+
+/* Animaciones keyframes */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes bounceIn {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  70% {
+    transform: scale(0.9);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Responsive breakpoints personalizados */
+@media (max-width: 640px) {
+  .sidebar-pymeyape {
+    @apply w-full h-auto;
+  }
+  
+  .metric-card {
+    @apply p-4;
+  }
+  
+  .table-pymeyape {
+    @apply text-sm;
+  }
+}
+
+/* Dark mode support (opcional) */
+@media (prefers-color-scheme: dark) {
+  .dark .card-pymeyape {
+    @apply bg-gray-800 border-gray-700;
+  }
+  
+  .dark .input-pymeyape {
+    @apply bg-gray-800 border-gray-600 text-white;
+  }
+}
+
+/* Print styles */
+@media print {
+  .sidebar-pymeyape {
+    @apply hidden;
+  }
+  
+  .no-print {
+    @apply hidden;
+  }
+}
+
+/* Estilos específicos para iconos Lucide */
+.lucide-icon {
+  @apply inline-block;
+}
+
+/* Estados de hover mejorados */
+.hover-scale {
+  @apply transition-transform duration-200 hover:scale-105;
+}
+
+.hover-lift {
+  @apply transition-transform duration-200 hover:-translate-y-1;
+}

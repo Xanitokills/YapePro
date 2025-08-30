@@ -1,7 +1,4 @@
 
-export const { clearError, setUser, clearAuth } = authSlice.actions;
-export default authSlice.reducer;
-
 // src/store/slices/ordersSlice.ts
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import { Order, OrderForm, OrderWithPaymentStatus } from '../../types';

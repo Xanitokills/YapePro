@@ -13,23 +13,23 @@ const StoreAdminMiniCrm: React.FC = () => {
     if (user?.role === 'store_admin' && user.store_id) {
       supabase
         .from('customers')
-        .select('id, name, phone, email, segment, store_id, tenant_id')
+        .select('id, name, phone, email, segment, store_id, tenant_id, phone_variations, name_variations, yape_historical_names, created_at, updated_at')
         .eq('store_id', user.store_id)
         .then(({ data }) => setCustomers(data || []));
     }
   }, [user]);
 
-  if (user?.role !== 'store_admin') return <Text className="text-red-500">Acceso denegado</Text>;
+  if (user?.role !== 'store_admin') return <Text style={{ color: 'red' }}>Acceso denegado</Text>;
 
   return (
-    <View className="flex-1 p-4 bg-gray-100">
-      <Text className="text-2xl font-bold mb-4">Mini CRM para Admin de Tienda</Text>
-      <Text className="mb-2">Gestión de clientes, inventario y reportes</Text>
+    <View style={styles.container}>
+      <Text style={styles.title}>Mini CRM para Admin de Tienda</Text>
+      <Text style={styles.subtitle}>Gestión de clientes, inventario y reportes</Text>
       <FlatList
         data={customers}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <View className="p-2 border-b border-gray-300">
+          <View style={styles.listItem}>
             <Text>{item.name} ({item.segment}) - {item.phone}</Text>
           </View>
         )}
@@ -37,5 +37,28 @@ const StoreAdminMiniCrm: React.FC = () => {
     </View>
   );
 };
+
+import { StyleSheet } from 'react-native';
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 16,
+    backgroundColor: '#f3f4f6', // bg-gray-100
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 16,
+  },
+  subtitle: {
+    marginBottom: 8,
+  },
+  listItem: {
+    padding: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#d1d5db', // border-gray-300
+  },
+});
 
 export default StoreAdminMiniCrm;
