@@ -1,6 +1,15 @@
 {
-  "extends": "expo/tsconfig.base",
+  "extends": "@tsconfig/react-native",
   "compilerOptions": {
-    "strict": true
-  }
+    "baseUrl": "src",
+    "jsx": "react-native",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "types": ["nativewind/types"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "babel.config.js", "metro.config.js"]
 }

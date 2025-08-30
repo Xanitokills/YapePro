@@ -1,7 +1,7 @@
 {
   "name": "yapepromobile",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -9,14 +9,25 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@react-navigation/native": "^7.1.17",
+    "@react-navigation/stack": "^7.4.7",
+    "@supabase/supabase-js": "^2.56.1",
     "expo": "~53.0.22",
+    "expo-device": "^7.1.4",
+    "expo-notifications": "^0.31.4",
     "expo-status-bar": "~2.2.3",
+    "nativewind": "^4.1.23",
     "react": "19.0.0",
-    "react-native": "0.79.6"
+    "react-native": "0.79.6",
+    "react-native-safe-area-context": "^5.6.1",
+    "react-native-screens": "^4.15.4",
+    "react-native-worklets": "^0.5.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
+    "@tsconfig/react-native": "^3.0.6",
     "@types/react": "~19.0.10",
+    "tailwindcss": "^3.4.17",
     "typescript": "~5.8.3"
   },
   "private": true
