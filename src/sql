@@ -1,0 +1,931 @@
+-- =============================================================================
+--  PymeYapePro - ESQUEMA COMPLETO v3.1 (one-shot, LIMPIO)
+--  Multi-tenant + Yape + Ventas + Inventario + RRHH + Compras + Promos + Subs
+--  Postgres/Supabase | TZ recomendada: America/Lima (-05:00)
+-- =============================================================================
+
+-- =========================
+-- 0) LIMPIEZA SEGURA (no falla si no existen objetos)
+-- =========================
+
+-- ---- Vistas ----
+DROP VIEW IF EXISTS orders_with_payment_status CASCADE;
+DROP VIEW IF EXISTS unmatched_yape_transactions CASCADE;
+
+-- ---- Triggers: dropear SOLO si existe la tabla ----
+DO $$
+BEGIN
+  IF to_regclass('public.orders') IS NOT NULL THEN
+    EXECUTE 'DROP TRIGGER IF EXISTS trigger_generate_order_reference ON public.orders';
+    EXECUTE 'DROP TRIGGER IF EXISTS trigger_process_paid_order ON public.orders';
+  END IF;
+
+  IF to_regclass('public.purchases') IS NOT NULL THEN
+    EXECUTE 'DROP TRIGGER IF EXISTS trg_purchase_received_stock ON public.purchases';
+  END IF;
+
+  IF to_regclass('public.payments') IS NOT NULL THEN
+    EXECUTE 'DROP TRIGGER IF EXISTS trg_after_payment_upd_order ON public.payments';
+  END IF;
+END$$;
+
+-- ---- Funciones ----
+DROP FUNCTION IF EXISTS generate_order_reference()     CASCADE;
+DROP FUNCTION IF EXISTS process_paid_order()           CASCADE;
+DROP FUNCTION IF EXISTS fn_apply_purchase_stock()      CASCADE;
+DROP FUNCTION IF EXISTS fn_update_order_paid()         CASCADE;
+
+-- ---- Tablas (hijas → padres) ----
+DROP TABLE IF EXISTS notifications CASCADE;
+DROP TABLE IF EXISTS audit_logs CASCADE;
+
+DROP TABLE IF EXISTS price_rules CASCADE;
+
+DROP TABLE IF EXISTS payments CASCADE;
+
+DROP TABLE IF EXISTS purchase_items CASCADE;
+DROP TABLE IF EXISTS purchases CASCADE;
+DROP TABLE IF EXISTS suppliers CASCADE;
+
+DROP TABLE IF EXISTS employee_shifts CASCADE;
+DROP TABLE IF EXISTS shifts CASCADE;
+DROP TABLE IF EXISTS employee_store_assignments CASCADE;
+DROP TABLE IF EXISTS employees CASCADE;
+
+DROP TABLE IF EXISTS attachments CASCADE;
+
+DROP TABLE IF EXISTS payment_reconciliation CASCADE;
+DROP TABLE IF EXISTS yape_transactions      CASCADE;
+DROP TABLE IF EXISTS yape_parsing_config    CASCADE;
+
+DROP TABLE IF EXISTS order_items            CASCADE;
+DROP TABLE IF EXISTS inventory_movements    CASCADE;
+DROP TABLE IF EXISTS stock_levels           CASCADE;
+
+DROP TABLE IF EXISTS orders                 CASCADE;
+DROP TABLE IF EXISTS products               CASCADE;
+DROP TABLE IF EXISTS customers              CASCADE;
+
+DROP TABLE IF EXISTS stores                 CASCADE;
+DROP TABLE IF EXISTS tenant_users           CASCADE;
+DROP TABLE IF EXISTS subscriptions          CASCADE;
+DROP TABLE IF EXISTS plans                  CASCADE;
+DROP TABLE IF EXISTS tenants                CASCADE;
+
+-- ---- Tipos ENUM (si existieran) ----
+DO $$
+DECLARE
+  t record;
+BEGIN
+  FOR t IN
+    SELECT typname
+    FROM pg_type
+    WHERE typname IN (
+      'reconciliation_action_enum','payment_method_enum','yape_transaction_status_enum',
+      'movement_type_enum','subscription_status_enum','payment_status_enum',
+      'tenant_status_enum','user_role_enum','purchase_status_enum','price_rule_type_enum'
+    )
+  LOOP
+    EXECUTE format('DROP TYPE IF EXISTS %I', t.typname);
+  END LOOP;
+END$$;
+
+-- =========================
+-- 1) EXTENSIONES
+-- =========================
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- =========================
+-- 2) ENUMS
+-- =========================
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='user_role_enum') THEN
+    CREATE TYPE user_role_enum AS ENUM ('OWNER','ADMIN','STAFF','VIEWER');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='tenant_status_enum') THEN
+    CREATE TYPE tenant_status_enum AS ENUM ('ACTIVE','SUSPENDED','INACTIVE');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='payment_status_enum') THEN
+    CREATE TYPE payment_status_enum AS ENUM ('PENDING','PAID','REFUNDED','FAILED');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='subscription_status_enum') THEN
+    CREATE TYPE subscription_status_enum AS ENUM ('ACTIVE','PAST_DUE','CANCELED','TRIALING');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='movement_type_enum') THEN
+    CREATE TYPE movement_type_enum AS ENUM ('PURCHASE','SALE','ADJUSTMENT','TRANSFER');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='yape_transaction_status_enum') THEN
+    CREATE TYPE yape_transaction_status_enum AS ENUM ('PENDING_PARSE','PARSED','PENDING_MATCH','MATCHED','MANUAL_REVIEW','REJECTED');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='payment_method_enum') THEN
+    CREATE TYPE payment_method_enum AS ENUM ('YAPE','CASH','CARD','BANK_TRANSFER');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='reconciliation_action_enum') THEN
+    CREATE TYPE reconciliation_action_enum AS ENUM ('AUTO_MATCHED','MANUAL_APPROVED','MANUAL_REJECTED','SYSTEM_TIMEOUT');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='purchase_status_enum') THEN
+    CREATE TYPE purchase_status_enum AS ENUM ('DRAFT','ORDERED','RECEIVED','CANCELED');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='price_rule_type_enum') THEN
+    CREATE TYPE price_rule_type_enum AS ENUM ('PERCENT_OFF','FIXED_DISCOUNT');
+  END IF;
+END$$;
+
+-- =========================
+-- 3) MULTI-TENANT + SUSCRIPCIONES
+-- =========================
+CREATE TABLE tenants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  status tenant_status_enum NOT NULL DEFAULT 'ACTIVE',
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE plans (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code text UNIQUE NOT NULL,            -- 'FREE','PRO','BUSINESS'
+  name text NOT NULL,
+  price_month decimal(10,2) NOT NULL DEFAULT 0,
+  entitlements jsonb NOT NULL DEFAULT '{}'::jsonb, -- {max_stores,max_employees,features:{...}}
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE subscriptions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  plan_id uuid NOT NULL REFERENCES plans(id),
+  status subscription_status_enum NOT NULL DEFAULT 'TRIALING',
+  current_period_start timestamp NOT NULL DEFAULT now(),
+  current_period_end timestamp,
+  cancel_at timestamp,
+  meta jsonb,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE stores (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  slug text UNIQUE NOT NULL,
+  address text,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+-- Membresías al tenant (tu rol como empresa vive aquí)
+CREATE TABLE tenant_users (
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  role user_role_enum NOT NULL DEFAULT 'VIEWER',
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, user_id)
+);
+
+-- =========================
+-- 4) PERSONAS / RRHH
+-- =========================
+CREATE TABLE employees (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id uuid REFERENCES auth.users(id), -- opcional: empleado con login
+  full_name text NOT NULL,
+  email text,
+  phone text,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE employee_store_assignments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  assignment_role text, -- p.ej. 'CASHIER','MANAGER'
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, store_id, employee_id)
+);
+
+CREATE TABLE shifts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  starts_at timestamp NOT NULL,
+  ends_at timestamp NOT NULL,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE employee_shifts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  shift_id uuid NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  role_at_shift text,
+  created_at timestamp NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, shift_id, employee_id)
+);
+
+-- =========================
+-- 5) CLIENTES / PRODUCTOS / PROMOS
+-- =========================
+CREATE TABLE customers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid REFERENCES stores(id),
+  name text NOT NULL,
+  phone text,
+  email text,
+  segment text NOT NULL DEFAULT 'REGULAR',
+  phone_variations jsonb NOT NULL DEFAULT '[]'::jsonb,
+  name_variations  jsonb NOT NULL DEFAULT '[]'::jsonb,
+  yape_historical_names jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE products (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  sku text NOT NULL,
+  name text NOT NULL,
+  category text,
+  price decimal(10,2) NOT NULL,
+  cost  decimal(10,2),
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, sku)
+);
+
+CREATE TABLE price_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  rule_type price_rule_type_enum NOT NULL, -- PERCENT_OFF / FIXED_DISCOUNT
+  percent_off decimal(5,2),    -- si PERCENT_OFF
+  fixed_off   decimal(10,2),   -- si FIXED_DISCOUNT
+  product_id uuid,             -- si aplica a un producto
+  category text,               -- o a toda una categoría
+  starts_at timestamp,
+  ends_at timestamp,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now(),
+  CHECK ((rule_type='PERCENT_OFF' AND percent_off IS NOT NULL) OR
+         (rule_type='FIXED_DISCOUNT' AND fixed_off IS NOT NULL))
+);
+
+-- =========================
+-- 6) VENTAS (POS)
+-- =========================
+CREATE TABLE orders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid REFERENCES stores(id),
+  customer_id uuid REFERENCES customers(id),
+  employee_id uuid, -- quien creó (employees.id o auth.users.id si prefieres)
+  total decimal(10,2) NOT NULL,
+  paid_status payment_status_enum NOT NULL DEFAULT 'PENDING',
+  reference_code text UNIQUE,
+  expected_payment_concept text,
+  payment_window_expires_at timestamp,
+  payment_method payment_method_enum,
+  auto_match_enabled boolean NOT NULL DEFAULT true,
+  manual_review_required boolean NOT NULL DEFAULT false,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE order_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id uuid REFERENCES products(id),
+  qty integer NOT NULL,
+  unit_price decimal(10,2) NOT NULL,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+-- =========================
+-- 7) YAPE / CONCILIACIÓN (antes de payments)
+-- =========================
+CREATE TABLE yape_transactions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  raw_notification jsonb NOT NULL,
+  notification_timestamp timestamp NOT NULL,
+  amount decimal(10,2),
+  sender_name text,
+  sender_phone text,
+  concept text,
+  yape_transaction_id text,
+  status yape_transaction_status_enum NOT NULL DEFAULT 'PENDING_PARSE',
+  matched_order_id uuid REFERENCES orders(id),
+  match_confidence decimal(3,2),
+  parsing_errors jsonb NOT NULL DEFAULT '[]'::jsonb,
+  matching_attempts integer NOT NULL DEFAULT 0,
+  last_matching_attempt timestamp,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE payment_reconciliation (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  yape_transaction_id uuid REFERENCES yape_transactions(id),
+  order_id uuid REFERENCES orders(id),
+  action reconciliation_action_enum NOT NULL,
+  confidence_score decimal(3,2),
+  employee_id uuid, -- quien aprobó/rechazó
+  employee_notes text,
+  matching_factors jsonb,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE yape_parsing_config (
+  tenant_id uuid PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  amount_patterns jsonb NOT NULL DEFAULT '[]'::jsonb,
+  sender_patterns jsonb NOT NULL DEFAULT '[]'::jsonb,
+  concept_patterns jsonb NOT NULL DEFAULT '[]'::jsonb,
+  auto_match_threshold decimal(3,2) NOT NULL DEFAULT 0.85,
+  payment_window_hours integer NOT NULL DEFAULT 24,
+  alert_on_high_amounts boolean NOT NULL DEFAULT true,
+  high_amount_threshold decimal(10,2) NOT NULL DEFAULT 500.00,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+-- =========================
+-- 8) COMPRAS A PROVEEDORES (antes de payments)
+-- =========================
+CREATE TABLE suppliers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  contact text,
+  phone text,
+  email text,
+  tax_id text, -- RUC
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE purchases (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid NOT NULL REFERENCES stores(id),
+  supplier_id uuid REFERENCES suppliers(id),
+  status purchase_status_enum NOT NULL DEFAULT 'DRAFT',
+  subtotal decimal(12,2) NOT NULL DEFAULT 0,
+  tax decimal(12,2) NOT NULL DEFAULT 0,
+  total decimal(12,2) NOT NULL DEFAULT 0,
+  notes text,
+  ordered_at timestamp,
+  received_at timestamp,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE purchase_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  purchase_id uuid NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES products(id),
+  qty integer NOT NULL,
+  unit_cost decimal(10,2) NOT NULL,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+-- =========================
+-- 9) PAGOS (multi-método) — ahora que existen yape/purchases
+-- =========================
+CREATE TABLE payments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  order_id uuid REFERENCES orders(id) ON DELETE CASCADE,
+  purchase_id uuid REFERENCES purchases(id) ON DELETE CASCADE, -- NULL para ventas; útil si pagas compras
+  method payment_method_enum NOT NULL,
+  amount decimal(10,2) NOT NULL,           -- >0 cobro, <0 devolución
+  currency text DEFAULT 'PEN',
+  received_at timestamp NOT NULL DEFAULT now(),
+  yape_transaction_ref uuid REFERENCES yape_transactions(id),
+  notes text,
+  created_at timestamp NOT NULL DEFAULT now(),
+  CHECK (
+    (order_id IS NOT NULL AND purchase_id IS NULL) OR
+    (order_id IS NULL AND purchase_id IS NOT NULL)
+  )
+);
+
+-- =========================
+-- 10) INVENTARIO
+-- =========================
+CREATE TABLE stock_levels (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  qty integer NOT NULL DEFAULT 0,
+  min_qty integer NOT NULL DEFAULT 0,
+  last_movement_at timestamp,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, store_id, product_id)
+);
+
+CREATE TABLE inventory_movements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  store_id uuid REFERENCES stores(id),
+  product_id uuid REFERENCES products(id),
+  movement_type movement_type_enum NOT NULL,
+  qty integer NOT NULL,         -- +IN / -OUT
+  unit_cost decimal(10,2),
+  reason text,
+  ref_id uuid,
+  ref_type text,                -- 'ORDER','PURCHASE','ADJUSTMENT'
+  employee_id uuid,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+-- =========================
+-- 11) ADJUNTOS / NOTIFS / AUDITORÍA
+-- =========================
+CREATE TABLE attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  ref_type text NOT NULL,      -- 'ORDER','PURCHASE','INVENTORY','CUSTOMER'
+  ref_id uuid NOT NULL,
+  storage_path text NOT NULL,  -- ruta en Supabase Storage
+  mime_type text,
+  size_bytes bigint,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  type text NOT NULL,            -- 'LOW_STOCK','PAYMENT_RECEIVED','YAPE_ALERT', etc.
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  seen boolean NOT NULL DEFAULT false,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE audit_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  actor_user_id uuid,           -- auth.users.id
+  action text NOT NULL,         -- 'CREATE','UPDATE','DELETE','MATCH','LOGIN'
+  entity text NOT NULL,         -- 'ORDER','PRODUCT','CUSTOMER','YAPE_TX', etc.
+  entity_id uuid,
+  before_json jsonb,
+  after_json jsonb,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+
+-- =========================
+-- 12) ÍNDICES
+-- =========================
+CREATE INDEX idx_orders_pending_payment ON orders (tenant_id, paid_status, created_at) WHERE paid_status='PENDING';
+CREATE INDEX idx_yape_matching ON yape_transactions (tenant_id, status, amount, notification_timestamp);
+CREATE INDEX idx_customers_name_gin ON customers USING gin (name_variations);
+CREATE INDEX idx_customers_phone_gin ON customers USING gin (phone_variations);
+CREATE INDEX idx_inv_movements ON inventory_movements (tenant_id, store_id, product_id, created_at);
+CREATE INDEX idx_emp_assign ON employee_store_assignments (tenant_id, store_id, employee_id);
+CREATE INDEX idx_payments_order ON payments (tenant_id, order_id, received_at);
+CREATE INDEX idx_purchases_status ON purchases (tenant_id, status, created_at);
+CREATE INDEX idx_tenant_users_user ON tenant_users (user_id);
+CREATE INDEX idx_attachments_ref ON attachments (tenant_id, ref_type, ref_id);
+
+-- =========================
+-- 13) TRIGGERS / FUNCIONES
+-- =========================
+-- Generar referencia de orden y ventana
+CREATE OR REPLACE FUNCTION generate_order_reference()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.reference_code IS NULL THEN
+    NEW.reference_code := 'ORD' || EXTRACT(epoch FROM now())::bigint || RIGHT(NEW.id::text, 4);
+    NEW.expected_payment_concept := 'Orden #' || NEW.reference_code;
+    NEW.payment_window_expires_at := now() + INTERVAL '24 hours';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_generate_order_reference
+  BEFORE INSERT ON orders
+  FOR EACH ROW EXECUTE FUNCTION generate_order_reference();
+
+-- Restar stock al marcar PAID
+CREATE OR REPLACE FUNCTION process_paid_order()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.paid_status <> 'PAID' AND NEW.paid_status = 'PAID' THEN
+    INSERT INTO inventory_movements (tenant_id, store_id, product_id, movement_type, qty, reason, ref_id, ref_type)
+    SELECT NEW.tenant_id, NEW.store_id, oi.product_id, 'SALE', -oi.qty,
+           'Venta - Orden #' || NEW.reference_code, NEW.id, 'ORDER'
+    FROM order_items oi WHERE oi.order_id = NEW.id;
+
+    UPDATE stock_levels s
+    SET qty = s.qty - m.total_qty,
+        last_movement_at = now(),
+        updated_at = now()
+    FROM (SELECT product_id, SUM(qty) total_qty FROM order_items WHERE order_id = NEW.id GROUP BY product_id) m
+    WHERE s.tenant_id = NEW.tenant_id AND s.store_id = NEW.store_id AND s.product_id = m.product_id;
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_process_paid_order
+  AFTER UPDATE ON orders
+  FOR EACH ROW EXECUTE FUNCTION process_paid_order();
+
+-- Aplicar stock al RECEIVED en compras
+CREATE OR REPLACE FUNCTION fn_apply_purchase_stock()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.status = 'RECEIVED' AND (OLD.status IS DISTINCT FROM 'RECEIVED') THEN
+    INSERT INTO inventory_movements (tenant_id, store_id, product_id, movement_type, qty, unit_cost, reason, ref_id, ref_type)
+    SELECT NEW.tenant_id, NEW.store_id, pi.product_id, 'PURCHASE', pi.qty, pi.unit_cost,
+           'Ingreso compra ' || NEW.id::text, NEW.id, 'PURCHASE'
+    FROM purchase_items pi WHERE pi.purchase_id = NEW.id;
+
+    UPDATE stock_levels s
+    SET qty = s.qty + m.total_qty,
+        last_movement_at = now(),
+        updated_at = now()
+    FROM (SELECT product_id, SUM(qty) total_qty FROM purchase_items WHERE purchase_id = NEW.id GROUP BY product_id) m
+    WHERE s.tenant_id = NEW.tenant_id AND s.store_id = NEW.store_id AND s.product_id = m.product_id;
+
+    UPDATE purchases SET received_at = now() WHERE id = NEW.id AND received_at IS NULL;
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_purchase_received_stock
+  AFTER UPDATE ON purchases
+  FOR EACH ROW EXECUTE FUNCTION fn_apply_purchase_stock();
+
+-- Marcar orden PAID cuando suma pagos >= total (y revertir si cae a <= 0)
+CREATE OR REPLACE FUNCTION fn_update_order_paid()
+RETURNS TRIGGER AS $$
+DECLARE
+  sum_paid decimal(10,2);
+  ord_total decimal(10,2);
+  target_order uuid;
+BEGIN
+  -- Determinar order_id en insert/update/delete
+  IF TG_OP = 'DELETE' THEN
+    target_order := OLD.order_id;
+  ELSE
+    target_order := NEW.order_id;
+  END IF;
+
+  IF target_order IS NULL THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  SELECT COALESCE(SUM(amount),0) INTO sum_paid FROM payments WHERE order_id = target_order;
+  SELECT total INTO ord_total FROM orders WHERE id = target_order;
+
+  IF ord_total IS NULL THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  IF sum_paid >= ord_total AND ord_total > 0 THEN
+    UPDATE orders SET paid_status = 'PAID', updated_at = now() WHERE id = target_order AND paid_status <> 'PAID';
+  ELSIF sum_paid <= 0 THEN
+    UPDATE orders SET paid_status = 'PENDING', updated_at = now() WHERE id = target_order AND paid_status <> 'PENDING';
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_after_payment_upd_order
+  AFTER INSERT OR UPDATE OR DELETE ON payments
+  FOR EACH ROW EXECUTE FUNCTION fn_update_order_paid();
+
+-- =========================
+-- 14) RLS + CRUD POR ROL
+-- =========================
+-- Habilitar RLS
+ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_users ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE employees ENABLE ROW LEVEL SECURITY;
+ALTER TABLE employee_store_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shifts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE employee_shifts ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE price_rules ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE order_items ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE yape_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_reconciliation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE yape_parsing_config ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE stock_levels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory_movements ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE suppliers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE purchases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE purchase_items ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE attachments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- tenant_users
+CREATE POLICY tu_select_self ON tenant_users FOR SELECT USING (user_id = auth.uid());
+CREATE POLICY tu_insert_self ON tenant_users FOR INSERT WITH CHECK (user_id = auth.uid());
+CREATE POLICY tu_update_self ON tenant_users FOR UPDATE USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+
+-- Tenants / Plans / Subs
+CREATE POLICY ten_sel ON tenants FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = tenants.id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY ten_upd_admin ON tenants FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = tenants.id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = tenants.id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY plans_read_all ON plans FOR SELECT USING (true);
+
+CREATE POLICY subs_sel ON subscriptions FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = subscriptions.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY subs_cud_admin ON subscriptions FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = subscriptions.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = subscriptions.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Stores
+CREATE POLICY st_sel ON stores FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stores.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY st_all_admin ON stores FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stores.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stores.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Employees / asignaciones / turnos
+CREATE POLICY emp_sel ON employees FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employees.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY emp_all_admin ON employees FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employees.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employees.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY esa_sel ON employee_store_assignments FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_store_assignments.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY esa_cud_admin ON employee_store_assignments FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_store_assignments.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_store_assignments.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY sh_sel ON shifts FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = shifts.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY sh_cu_staff ON shifts FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY sh_u_staff ON shifts FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY sh_d_admin ON shifts FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY es_sel ON employee_shifts FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_shifts.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY es_cu_staff ON employee_shifts FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY es_u_staff ON employee_shifts FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY es_d_admin ON employee_shifts FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = employee_shifts.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Clientes / Productos / Promos
+CREATE POLICY cust_sel ON customers FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = customers.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY cust_cu_staff ON customers FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = customers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY cust_u_staff ON customers FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = customers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = customers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY cust_d_admin ON customers FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = customers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY prod_sel ON products FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = products.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY prod_all_admin ON products FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = products.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = products.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY pr_sel ON price_rules FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = price_rules.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY pr_all_admin ON price_rules FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = price_rules.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = price_rules.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Órdenes / Ítems
+CREATE POLICY ord_sel ON orders FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = orders.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY ord_cu_staff ON orders FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = orders.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY ord_u_staff ON orders FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = orders.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = orders.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY ord_d_admin ON orders FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = orders.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY oi_sel ON order_items FOR SELECT
+USING (EXISTS (SELECT 1 FROM orders o JOIN tenant_users tu ON tu.tenant_id=o.tenant_id
+               WHERE o.id=order_items.order_id AND tu.user_id=auth.uid() AND tu.is_active));
+CREATE POLICY oi_cu_staff ON order_items FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM orders o JOIN tenant_users tu ON tu.tenant_id=o.tenant_id
+                    WHERE o.id=order_items.order_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY oi_u_staff ON order_items FOR UPDATE
+USING (EXISTS (SELECT 1 FROM orders o JOIN tenant_users tu ON tu.tenant_id=o.tenant_id
+               WHERE o.id=order_items.order_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM orders o JOIN tenant_users tu ON tu.tenant_id=o.tenant_id
+                    WHERE o.id=order_items.order_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY oi_d_admin ON order_items FOR DELETE
+USING (EXISTS (SELECT 1 FROM orders o JOIN tenant_users tu ON tu.tenant_id=o.tenant_id
+               WHERE o.id=order_items.order_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Pagos
+CREATE POLICY pay_sel ON payments FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = payments.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY pay_cu_staff ON payments FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id=payments.tenant_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY pay_u_admin ON payments FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id=payments.tenant_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id=payments.tenant_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+CREATE POLICY pay_d_admin ON payments FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id=payments.tenant_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Yape / Reconciliation / Parsing Config
+CREATE POLICY yt_sel ON yape_transactions FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_transactions.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY yt_all_staff ON yape_transactions FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_transactions.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_transactions.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+
+CREATE POLICY prc_sel ON payment_reconciliation FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = payment_reconciliation.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY prc_all_staff ON payment_reconciliation FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = payment_reconciliation.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = payment_reconciliation.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+
+CREATE POLICY ypc_sel ON yape_parsing_config FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_parsing_config.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY ypc_all_staff ON yape_parsing_config FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_parsing_config.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = yape_parsing_config.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+
+-- Inventario
+CREATE POLICY sl_sel ON stock_levels FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stock_levels.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY sl_all_admin ON stock_levels FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stock_levels.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = stock_levels.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY im_sel ON inventory_movements FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = inventory_movements.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY im_ins_staff ON inventory_movements FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = inventory_movements.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY im_ud_admin ON inventory_movements FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = inventory_movements.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = inventory_movements.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+CREATE POLICY im_del_admin ON inventory_movements FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = inventory_movements.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Proveedores / Compras
+CREATE POLICY sup_sel ON suppliers FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = suppliers.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY sup_all_admin ON suppliers FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = suppliers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = suppliers.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY pur_sel ON purchases FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = purchases.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY pur_cu_staff ON purchases FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = purchases.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY pur_u_staff ON purchases FOR UPDATE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = purchases.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = purchases.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY pur_d_admin ON purchases FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = purchases.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY pi_sel ON purchase_items FOR SELECT
+USING (EXISTS (SELECT 1 FROM purchases p JOIN tenant_users tu ON tu.tenant_id=p.tenant_id
+               WHERE p.id=purchase_items.purchase_id AND tu.user_id=auth.uid() AND tu.is_active));
+CREATE POLICY pi_cu_staff ON purchase_items FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM purchases p JOIN tenant_users tu ON tu.tenant_id=p.tenant_id
+                    WHERE p.id=purchase_items.purchase_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY pi_u_staff ON purchase_items FOR UPDATE
+USING (EXISTS (SELECT 1 FROM purchases p JOIN tenant_users tu ON tu.tenant_id=p.tenant_id
+               WHERE p.id=purchase_items.purchase_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM purchases p JOIN tenant_users tu ON tu.tenant_id=p.tenant_id
+                    WHERE p.id=purchase_items.purchase_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY pi_d_admin ON purchase_items FOR DELETE
+USING (EXISTS (SELECT 1 FROM purchases p JOIN tenant_users tu ON tu.tenant_id=p.tenant_id
+               WHERE p.id=purchase_items.purchase_id AND tu.user_id=auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+-- Adjuntos / Notifs / Auditoría
+CREATE POLICY att_sel ON attachments FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = attachments.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY att_cu_staff ON attachments FOR INSERT
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = attachments.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+CREATE POLICY att_d_admin ON attachments FOR DELETE
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = attachments.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN') AND tu.is_active));
+
+CREATE POLICY noti_sel ON notifications FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = notifications.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+CREATE POLICY noti_all_staff ON notifications FOR ALL
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = notifications.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active))
+WITH CHECK (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = notifications.tenant_id AND tu.user_id = auth.uid() AND tu.role IN ('OWNER','ADMIN','STAFF') AND tu.is_active));
+
+CREATE POLICY audit_sel ON audit_logs FOR SELECT
+USING (EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.tenant_id = audit_logs.tenant_id AND tu.user_id = auth.uid() AND tu.is_active));
+-- (Escritura de audit_logs desde backend con service role)
+
+-- =========================
+-- 15) VISTAS ÚTILES
+-- =========================
+CREATE OR REPLACE VIEW orders_with_payment_status AS
+SELECT 
+  o.*,
+  c.name AS customer_name,
+  c.phone AS customer_phone,
+  CASE 
+    WHEN o.paid_status = 'PAID' THEN 'Pagado'
+    WHEN o.payment_window_expires_at < now() THEN 'Expirado'
+    ELSE 'Pendiente'
+  END AS payment_status_display,
+  yt.id AS matched_yape_transaction_id,
+  yt.match_confidence
+FROM orders o
+LEFT JOIN customers c ON c.id = o.customer_id
+LEFT JOIN yape_transactions yt ON yt.matched_order_id = o.id;
+
+CREATE OR REPLACE VIEW unmatched_yape_transactions AS
+SELECT 
+  yt.*,
+  EXTRACT(hours FROM now() - yt.notification_timestamp) AS hours_since_received
+FROM yape_transactions yt
+WHERE yt.status IN ('PARSED','PENDING_MATCH','MANUAL_REVIEW')
+  AND yt.matched_order_id IS NULL
+ORDER BY yt.notification_timestamp DESC;
+
+-- =========================
+-- 16) SEEDS MÍNIMOS
+-- =========================
+INSERT INTO plans (code,name,price_month,entitlements) VALUES
+('FREE','Free',0,'{"max_stores":1,"max_employees":3,"features":{"yape":true,"promos":false}}'),
+('PRO','Pro',99.00,'{"max_stores":5,"max_employees":50,"features":{"yape":true,"promos":true}}')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO tenants (id,name,status) VALUES
+('00000000-0000-0000-0000-000000000001','Tenant Demo','ACTIVE')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO subscriptions (tenant_id,plan_id,status,current_period_start)
+SELECT '00000000-0000-0000-0000-000000000001', p.id, 'ACTIVE', now()
+FROM plans p WHERE p.code='PRO'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO stores (tenant_id,name,slug,address)
+VALUES ('00000000-0000-0000-0000-000000000001','Tienda Principal','tienda-principal','Av. Demo 123')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO products (tenant_id,sku,name,category,price,cost)
+VALUES ('00000000-0000-0000-0000-000000000001','SKU-001','Producto Demo','General',15.50,8.00)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO yape_parsing_config (tenant_id) VALUES ('00000000-0000-0000-0000-000000000001')
+ON CONFLICT DO NOTHING;
+
+-- Vincular primer usuario como OWNER del tenant demo (si existe en auth.users)
+DO $$
+DECLARE any_user uuid;
+BEGIN
+  SELECT id INTO any_user FROM auth.users ORDER BY created_at ASC LIMIT 1;
+  IF any_user IS NOT NULL THEN
+    INSERT INTO tenant_users (tenant_id,user_id,role,is_active)
+    VALUES ('00000000-0000-0000-0000-000000000001', any_user, 'OWNER', true)
+    ON CONFLICT DO NOTHING;
+
+    INSERT INTO employees (tenant_id,user_id,full_name,email,active)
+    VALUES ('00000000-0000-0000-0000-000000000001', any_user, 'Administrador', NULL, true)
+    ON CONFLICT DO NOTHING;
+  END IF;
+END$$;
+
+-- Crear stock inicial 10 uds
+INSERT INTO stock_levels (tenant_id, store_id, product_id, qty, min_qty)
+SELECT '00000000-0000-0000-0000-000000000001', s.id, p.id, 10, 0
+FROM stores s JOIN products p ON p.tenant_id = s.tenant_id
+WHERE s.slug='tienda-principal'
+ON CONFLICT DO NOTHING;
+
+-- Verificación
+SELECT 'Instalación OK v3.1' AS status;

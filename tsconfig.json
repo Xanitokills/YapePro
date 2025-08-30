@@ -1,5 +1,5 @@
 {
-  "extends": "@tsconfig/react-native",
+  "extends": "./node_modules/@tsconfig/react-native/tsconfig.json",
   "compilerOptions": {
     "baseUrl": "src",
     "jsx": "react-native",
@@ -7,8 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
-    "moduleResolution": "node",
-    "types": ["nativewind/types"]
+    "moduleResolution": "node"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "babel.config.js", "metro.config.js"]
