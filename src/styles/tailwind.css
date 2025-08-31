@@ -1,4 +1,4 @@
-@import './pymeyapepro.css';
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* styles/tailwind.css */
+@import "tailwindcss";
+
+@source "./src/**/*.{js,jsx,ts,tsx}"; /* Escanea todos los archivos de origen */

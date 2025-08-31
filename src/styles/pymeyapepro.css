@@ -4,6 +4,7 @@
 /* Si necesitas utilidades de Tailwind, importa pymeyapepro.css en tailwind.css o viceversa. Este archivo debe contener solo estilos personalizados. */
 
 /* Variables CSS personalizadas para PymeYapePro */
+@import "tailwindcss";
 :root {
   --pymeyape-primary: #d97706; /* yellow-600 */
   --pymeyape-primary-hover: #b45309; /* yellow-700 */
